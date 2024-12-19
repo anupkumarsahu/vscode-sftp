@@ -44,36 +44,61 @@ function createFileSelector(filterCreator?) {
   };
 }
 
-export function selectContext(): Promise<Uri | undefined> {
-  return new Promise((resolve, reject) => {
-    const sercives = getAllFileService();
-    const projectsList = sercives
-      .map(service => ({
-        value: service.baseDir,
-        label: service.name || simplifyPath(service.baseDir),
-        description: '',
-        detail: service.baseDir,
-      }))
-      .sort((l, r) => l.label.localeCompare(r.label));
+// export function selectContext(): Promise<Uri | undefined> {
+//   return new Promise((resolve, reject) => {
+//     const sercives = getAllFileService();
+//     const projectsList = sercives
+//       .map(service => ({
+//         value: service.baseDir,
+//         label: service.name || simplifyPath(service.baseDir),
+//         description: '',
+//         detail: service.baseDir,
+//       }))
+//       .sort((l, r) => l.label.localeCompare(r.label));
 
-    // if (projectsList.length === 1) {
-    // return resolve(projectsList[0].value);
-    // }
+//     // if (projectsList.length === 1) {
+//     // return resolve(projectsList[0].value);
+//     // }
 
-    window
-      .showQuickPick(projectsList, {
-        placeHolder: 'Select a folder...',
-      })
-      .then(selection => {
-        if (selection) {
-          return resolve(Uri.file(selection.value));
-        }
+//     window
+//       .showQuickPick(projectsList, {
+//         placeHolder: 'Select a folder...',
+//       })
+//       .then(selection => {
+//         if (selection) {
+//           return resolve(Uri.file(selection.value));
+//         }
 
-        // cancel selection
-        resolve();
-      }, reject);
+//         // cancel selection
+//         resolve();
+//       }, reject);
+//   });
+// }
+
+export async function selectContext(): Promise<Uri | undefined> {
+  const services = getAllFileService();
+
+  const projectsList = services
+    .map(service => ({
+      value: service.baseDir,
+      label: service.name || simplifyPath(service.baseDir),
+      description: '',
+      detail: service.baseDir,
+    }))
+    .sort((l, r) => l.label.localeCompare(r.label));
+
+  // Uncomment if you want to auto-select when only one option exists
+  // if (projectsList.length === 1) {
+  //   return Uri.file(projectsList[0].value);
+  // }
+
+  const selection = await window.showQuickPick(projectsList, {
+    placeHolder: 'Select a folder...',
   });
+
+  return selection ? Uri.file(selection.value) : undefined;
 }
+
 
 export function applySelector<T>(...selectors: ((...args: any[]) => T | Promise<T>)[]) {
   return function combinedSelector(...args: any[]): T | Promise<T> {
