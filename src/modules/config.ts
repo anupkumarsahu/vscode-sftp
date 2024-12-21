@@ -5,6 +5,7 @@ import * as Joi from "joi";
 import { CONFIG_PATH } from "../constants";
 import { reportError } from "../helper";
 import { showTextDocument } from "../host";
+import logger from "../logger";
 
 // const nullable = schema => schema.optional().allow(null);
 // const nullable = schema => schema.allow(null).optional();
@@ -12,7 +13,7 @@ import { showTextDocument } from "../host";
 const configScheme = Joi.object({
   name: Joi.string(),
 
-  context: Joi.string(),
+  context: Joi.string().optional(),
   protocol: Joi.any().valid("sftp", "ftp", "local"),
 
   host: Joi.string().required(),
@@ -185,21 +186,92 @@ function getConfigPath(basePath) {
 //   message: string;
 // }
 
-export function validateConfig(config: any): { message: string } {
+// export function validateConfig(config: any): { message: string } {
+//   const { error } = configScheme.validate(config, {
+//     allowUnknown: true,
+//     convert: false,
+//     messages: {
+//       "object.child": '!!prop "{{!child}}" fails because {{reason}}',
+//     },
+//   });
+
+//   if (error) {
+//     return { message: error.message }; // Convert the error to a consistent format
+//   }
+
+//   return { message: "Validation passed." }; // Return undefined if no error exists
+// }
+
+// export function validateConfig(config: any): { isValid: boolean; message: string } {
+//   const { error } = configScheme.validate(config, {
+//     allowUnknown: true,
+//     convert: false,
+//     messages: {
+//       "object.child": '!!Property "{{!child}}" fails because {{reason}}',
+//       "any.required": '!!Property "{{#label}}" is required.',
+//       "string.base": '!!Property "{{#label}}" must be a string.',
+//       "number.base": '!!Property "{{#label}}" must be a number.',
+//     },
+//   });
+
+//   if (error) {
+//     // Return validation error details
+//     return { 
+//       isValid: false, 
+//       message: `Validation failed: ${error.message}` 
+//     };
+//   }
+
+//   // Return success state
+//   return { 
+//     isValid: true, 
+//     message: "Validation passed successfully." 
+//   };
+// }
+
+export function validateConfig(config: any): { isValid: boolean; message: string; details?: any[] } {
+  const validationMessages = {
+    "object.child": '!!Property "{{!child}}" fails because {{reason}}',
+    "any.required": '!!Property "{{#label}}" is required.',
+    "string.base": '!!Property "{{#label}}" must be a string.',
+    "number.base": '!!Property "{{#label}}" must be a number.',
+  };
+
+  if (!config || typeof config !== 'object') {
+    throw new Error('Invalid input: Configuration must be a non-empty object.');
+  }
+
   const { error } = configScheme.validate(config, {
     allowUnknown: true,
     convert: false,
-    messages: {
-      "object.child": '!!prop "{{!child}}" fails because {{reason}}',
-    },
+    messages: validationMessages,
   });
 
   if (error) {
-    return { message: error.message }; // Convert the error to a consistent format
+    logger.error("Validation failed.", {
+      error: error.message,
+      config,
+    });
+
+    return { 
+      isValid: false, 
+      message: `Validation failed: ${error.message}`,
+      details: error.details.map(detail => ({
+        path: detail.path.join('.'),
+        type: detail.type,
+        message: detail.message,
+      })),
+    };
   }
 
-  return { message: "Validation passed." }; // Return undefined if no error exists
+  logger.info("Validation passed successfully.", { config });
+
+  return { 
+    isValid: true, 
+    message: "Validation passed successfully." 
+  };
 }
+
 
 export function readConfigsFromFile(configPath): Promise<any[]> {
   return fse.readJson(configPath).then((config) => {

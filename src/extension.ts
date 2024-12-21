@@ -10,6 +10,7 @@ import { tryLoadConfigs } from './modules/config';
 import { getAllFileService, createFileService, disposeFileService } from './modules/serviceManager';
 import { getWorkspaceFolders, setContextValue } from './host';
 import RemoteExplorer from './modules/remoteExplorer';
+import logger from './logger';
 
 async function setupWorkspaceFolder(dir) {
   const configs = await tryLoadConfigs(dir);
@@ -28,6 +29,10 @@ function setup(workspaceFolders: vscode.WorkspaceFolder[]) {
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
 export async function activate(context: vscode.ExtensionContext) {
+  console.log("context: ",context);
+   // Access extension-specific paths
+  logger.info(`Inside activat function`)
+
   try {
     initCommands(context);
   } catch (error) {

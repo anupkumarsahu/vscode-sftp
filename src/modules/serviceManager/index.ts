@@ -128,15 +128,18 @@ export function createFileService(config: any, workspace: string) {
 }
 
 export function getFileService(uri: Uri): FileService {
+  logger.info(`function getFileService of index.ts`)
   let fileService;
   if (UResource.isRemote(uri)) {
     const remoteRoot = app.remoteExplorer.findRoot(uri);
+    logger.debug(`remoteRoot: ${remoteRoot}`)
     if (remoteRoot) {
       fileService = remoteRoot.explorerContext.fileService;
     }
   } else {
     fileService = serviceManager.findPrefix(normalizePathForTrie(uri.fsPath));
   }
+  logger.debug(`fileService: ${fileService}`)
 
   return fileService;
 }

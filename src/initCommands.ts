@@ -5,6 +5,7 @@ import Command from './commands/abstract/command';
 import { createCommand, createFileCommand, createFileMultiCommand } from './commands/abstract/createCommand';
 
 export default function init(context: ExtensionContext) {
+  logger.info(`init function of initCommands.ts`);
   loadCommands(
     require.context(
       // Look for files in the commands directory
