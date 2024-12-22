@@ -4,11 +4,9 @@ import * as vscode from 'vscode';
 import * as output from './ui/output';
 import { getExtensionSetting } from './modules/ext';
 
-console.log('Logger initialization');
 const extSetting = getExtensionSetting();
 
 const debug = extSetting.debug || extSetting.printDebugLog;
-console.log('debug value: ', debug);
 
 // Get the workspace folder path
 const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -29,19 +27,29 @@ if (!fs.existsSync(logFolderPath)) {
   }
 }
 
-console.log(`Log path: `, logFolderPath)
+// // Define a function to append logs to a file
+// function appendLogToFile(message: string) {
+//   fs.appendFile(logFilePath, message + '\n', (err) => {
+//     if (err) {
+//       console.error('Error writing to log file:', err);
+//     }
+//   });
+// }
 
-// Define a function to append logs to a file
+// Define a function to append logs to a file (synchronous)
 function appendLogToFile(message: string) {
-  fs.appendFile(logFilePath, message + '\n', (err) => {
-    if (err) {
-      console.error('Error writing to log file:', err);
-    }
-  });
+  try {
+    fs.appendFileSync(logFilePath, message + '\n');
+  } catch (err) {
+    console.error('Error writing to log file:', err);
+  }
 }
 
+
 // Add "Starting log message" to the log file
+appendLogToFile(`================================================================`);
 appendLogToFile(`=== Starting log for extension - ${new Date().toISOString()} ===`);
+appendLogToFile(`================================================================`);
 
 const paddingTime = time => ('00' + time).slice(-2);
 
@@ -120,8 +128,6 @@ class VSCodeLogger implements Logger {
     this.logToOutput('critical', message instanceof Error ? message.stack || message.message : message, ...args);
   }
 }
-
-console.log('Logger initialization over');
 
 const logger = new VSCodeLogger();
 

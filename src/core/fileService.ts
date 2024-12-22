@@ -119,33 +119,70 @@ type ConfigValidator = (x: any) => { message: string };
 
 const DEFAULT_SSHCONFIG_FILE = '~/.ssh/config';
 
+/**
+ * Retrieves a list of ignored files from the configuration.
+ * Combines the `ignore` list from the configuration and the contents of the specified `ignoreFile`.
+ *
+ * @param {FileServiceConfig} config - The file service configuration.
+ * @returns {string[]} - An array of file patterns to ignore.
+ * @throws {Error} - Throws an error if the `ignoreFile` does not exist.
+ */
 function filesIgnoredFromConfig(config: FileServiceConfig): string[] {
   const cache = app.fsCache;
-  const ignore: string[] =
-    config.ignore && config.ignore.length ? config.ignore : [];
+
+  // Initialize the ignore list with the `ignore` property from the config
+  const ignore: string[] = Array.isArray(config.ignore) && config.ignore.length 
+    ? config.ignore 
+    : [];
+
+  logger.info('Processing ignored files from config...', { config });
 
   const ignoreFile = config.ignoreFile;
   if (!ignoreFile) {
+    // If no ignoreFile is specified, return the ignore list
+    logger.info('No ignoreFile specified in the configuration.');
     return ignore;
   }
 
-  let ignoreFromFile;
+  logger.debug('Checking for ignoreFile...', { ignoreFile });
+
+  let ignoreFromFile = ''; // Initialize as an empty string
   if (cache.has(ignoreFile)) {
-    ignoreFromFile = cache.get(ignoreFile);
+    // Use cached content if available
+    const cachedContent = cache.get(ignoreFile);
+    if (typeof cachedContent === 'string') {
+      ignoreFromFile = cachedContent;
+      logger.debug('Loaded ignoreFile from cache.', { ignoreFile });
+    } else {
+      logger.error('Invalid cached content for ignoreFile.', { ignoreFile, cachedContent });
+      throw new Error(`Cached content for ${ignoreFile} is not a string.`);
+    }
   } else if (fs.existsSync(ignoreFile)) {
-    ignoreFromFile = fs.readFileSync(ignoreFile).toString();
-    cache.set(ignoreFile, ignoreFromFile);
+    // Read the ignoreFile if it exists
+    try {
+      ignoreFromFile = fs.readFileSync(ignoreFile, 'utf8');
+      cache.set(ignoreFile, ignoreFromFile);
+      logger.debug('Loaded ignoreFile from disk and cached it.', { ignoreFile });
+    } catch (err) {
+      logger.error('Failed to read ignoreFile.', { ignoreFile, error: err.message });
+      throw new Error(`Error reading ignoreFile ${ignoreFile}: ${err.message}`);
+    }
   } else {
-    throw new Error(
-      `File ${ignoreFile} not found. Check your config of "ignoreFile"`
-    );
+    // Throw an error if the ignoreFile does not exist
+    logger.error(`Ignore file not found: ${ignoreFile}`);
+    throw new Error(`File ${ignoreFile} not found. Check your config of "ignoreFile".`);
   }
 
-  return ignore.concat(ignoreFromFile.split(/\r?\n/g));
+  // Combine the ignore list and the content of the ignore file, split into lines
+  const combinedIgnore = ignore.concat(ignoreFromFile.split(/\r?\n/g).filter(line => line.trim()));
+  logger.info('Combined ignore list generated.', { combinedIgnore });
+
+  return combinedIgnore;
 }
 
 function getHostInfo(config) {
-  logger.info(`function getHostInfo of fileService.ts`)
+  logger.info('Starting getHostInfo of fileService.ts');
+  
   const ignoreOptions = [
     'name',
     'remotePath',
@@ -161,14 +198,21 @@ function getHostInfo(config) {
     'sshConfigPath',
   ];
 
-  return Object.keys(config).reduce((obj, key) => {
+  const result = Object.keys(config).reduce((obj, key) => {
     if (ignoreOptions.indexOf(key) === -1) {
       obj[key] = config[key];
     }
-    logger.info(`obj: ${obj}`)
+    // Log after each key iteration for better clarity on what's happening
+    logger.debug(`Checking key: ${key}, added to result: ${!(ignoreOptions.indexOf(key) === -1)}`);
     return obj;
   }, {});
+
+  // Log the final object after filtering, but only once to avoid excessive logging
+  logger.info(`Filtered config result: ${JSON.stringify(result)}`);
+
+  return result;
 }
+
 
 function chooseDefaultPort(protocol) {
   return protocol === 'ftp' ? 21 : 22;
@@ -187,66 +231,90 @@ function setConfigValue(config, key, value) {
 function mergeConfigWithExternalRefer(
   config: FileServiceConfig
 ): FileServiceConfig {
-  const copyed = Object.assign({}, config);
+  // Create a copy of the config object to avoid mutating the original
+  const mergedConfig = { ...config };
 
+  logger.info('Starting mergeConfigWithExternalRefer...');
+  logger.debug('Input configuration:', config);
+
+  // Check and merge configuration from remote if `config.remote` exists
   if (config.remote) {
+    logger.info(`Merging remote configuration for key: "${config.remote}"`);
     const remoteMap = getUserSetting(SETTING_KEY_REMOTE);
     const remote = remoteMap.get<Record<string, any>>(config.remote);
+
     if (!remote) {
-      throw new Error(`Can\'t not find remote "${config.remote}"`);
+      const errorMessage = `Cannot find remote configuration for "${config.remote}".`;
+      logger.error(errorMessage);
+      throw new Error(errorMessage);
     }
+
+    // Key mappings for remote configurations
     const remoteKeyMapping = new Map([['scheme', 'protocol']]);
+    // Keys to ignore during merging
+    const remoteKeysIgnored = new Set(['rootPath']);
 
-    const remoteKeyIgnored = new Map([['rootPath', 1]]);
-
-    Object.keys(remote).forEach(key => {
-      if (remoteKeyIgnored.has(key)) {
+    Object.entries(remote).forEach(([key, value]) => {
+      if (remoteKeysIgnored.has(key)) {
+        logger.debug(`Ignoring remote key: "${key}"`);
         return;
       }
 
-      const targetKey = remoteKeyMapping.has(key)
-        ? remoteKeyMapping.get(key)
-        : key;
-      setConfigValue(copyed, targetKey, remote[key]);
+      const targetKey = remoteKeyMapping.get(key) || key;
+      logger.debug(`Mapping remote key: "${key}" -> "${targetKey}"`);
+      setConfigValue(mergedConfig, targetKey, value);
     });
+
+    logger.info('Remote configuration merged successfully.');
   }
 
+  // If the protocol is not "sftp", no further processing is required
   if (config.protocol !== 'sftp') {
-    return copyed;
+    logger.info(`Protocol is not "sftp". Returning merged configuration.`);
+    return mergedConfig;
   }
 
+  logger.info('Protocol is "sftp". Proceeding with SSH configuration merge.');
+
+  // Resolve the SSH configuration file path
   const sshConfigPath = replaceHomePath(
     config.sshConfigPath || DEFAULT_SSHCONFIG_FILE
   );
 
+  logger.debug(`Resolved SSH config path: "${sshConfigPath}"`);
+
+  // Use cache for loading SSH config content
   const cache = app.fsCache;
-  let sshConfigContent;
-  if (cache.has(sshConfigPath)) {
-    sshConfigContent = cache.get(sshConfigPath);
-  } else {
-    try {
-      sshConfigContent = fs.readFileSync(sshConfigPath, 'utf8');
-    } catch (error) {
-      logger.warn(error.message, `load ${sshConfigPath} failed`);
-      sshConfigContent = '';
-    }
-    cache.set(sshConfigPath, sshConfigContent);
-  }
+  let sshConfigContent = cache.get(sshConfigPath);
 
   if (!sshConfigContent) {
-    return copyed;
+    logger.info(`SSH config not found in cache. Reading from file: "${sshConfigPath}"`);
+    try {
+      sshConfigContent = fs.readFileSync(sshConfigPath, 'utf8');
+      cache.set(sshConfigPath, sshConfigContent);
+      logger.info(`SSH config file loaded and cached.`);
+    } catch (error) {
+      const errorMessage = `Failed to load SSH configuration from "${sshConfigPath}": ${error.message}`;
+      logger.warn(errorMessage);
+      return mergedConfig; // Return without modifying the config
+    }
+  } else {
+    logger.info('SSH config loaded from cache.');
   }
 
+  // Parse the SSH configuration file
   const parsedSSHConfig = sshConfig.parse(sshConfigContent);
-  const section = parsedSSHConfig.find({
-    Host: copyed.host,
-  });
+  const section = parsedSSHConfig.find({ Host: mergedConfig.host });
 
-  if (section === null) {
-    return copyed;
+  if (!section) {
+    logger.debug(`No SSH configuration found for host "${mergedConfig.host}".`);
+    return mergedConfig;
   }
 
-  const mapping = new Map([
+  logger.info(`SSH configuration found for host "${mergedConfig.host}". Merging...`);
+
+  // Map SSH configuration keys to `mergedConfig`
+  const sshKeyMapping = new Map([
     ['hostname', 'host'],
     ['port', 'port'],
     ['user', 'username'],
@@ -255,93 +323,25 @@ function mergeConfigWithExternalRefer(
     ['connecttimeout', 'connTimeout'],
   ]);
 
-  section.config.forEach(line => {
-    if (!line.param) {
-      return;
-    }
+  section.config.forEach((line) => {
+    if (!line.param) return;
 
-    const key = mapping.get(line.param.toLowerCase());
-
-    if (key !== undefined) {
+    const key = sshKeyMapping.get(line.param.toLowerCase());
+    if (key) {
+      logger.debug(`Mapping SSH config key: "${line.param}" -> "${key}"`);
       if (key === 'host') {
-        copyed[key] = line.value;
+        mergedConfig[key] = line.value;
       } else {
-        setConfigValue(copyed, key, line.value);
+        setConfigValue(mergedConfig, key, line.value);
       }
     }
   });
 
-  // Bug introduced in pull request #69 : Fix ssh config resolution
-  /* const parsedSSHConfig = sshConfig.parse(sshConfigContent);
-  const computed = parsedSSHConfig.compute(copyed.host);
+  logger.info('SSH configuration merged successfully.');
+  logger.debug('Final merged configuration:', mergedConfig);
 
-  const mapping = new Map([
-    ['hostname', 'host'],
-    ['port', 'port'],
-    ['user', 'username'],
-    ['serveraliveinterval', 'keepalive'],
-    ['connecttimeout', 'connTimeout'],
-  ]);
-
-  Object.entries<any>(computed).forEach(([param, value]) => {
-    if (param.toLowerCase() === 'identityfile') {
-      setConfigValue(copyed, 'privateKeyPath', value[0]);
-      return;
-    }
-
-    const key = mapping.get(param.toLowerCase());
-
-    if (key !== undefined) {
-      // don't need consider config priority, always set to the resolve host.
-      if (key === 'host') {
-        copyed[key] = value;
-      } else {
-        setConfigValue(copyed, key, value);
-      }
-    }
-  }); */
-
-  return copyed;
+  return mergedConfig;
 }
-
-// function getCompleteConfig(
-//   config: FileServiceConfig,
-//   workspace: string
-// ): FileServiceConfig {
-//   const mergedConfig = mergeConfigWithExternalRefer(config);
-
-//   if (mergedConfig.agent && mergedConfig.privateKeyPath) {
-//     logger.warn(
-//       'Config Option Conflicted. You are specifing "agent" and "privateKey" at the same time, ' +
-//         'the later will be ignored.'
-//     );
-//   }
-
-//   // remove the './' part from a relative path
-//   mergedConfig.remotePath = upath.normalize(mergedConfig.remotePath);
-//   if (mergedConfig.privateKeyPath) {
-//     mergedConfig.privateKeyPath = resolvePath(
-//       workspace,
-//       mergedConfig.privateKeyPath
-//     );
-//   }
-
-//   if (mergedConfig.ignoreFile) {
-//     mergedConfig.ignoreFile = resolvePath(workspace, mergedConfig.ignoreFile);
-//   }
-
-//   // convert ingore config to ignore function
-//   if (mergedConfig.agent && mergedConfig.agent.startsWith('$')) {
-//     const evnVarName = mergedConfig.agent.slice(1);
-//     const val = process.env[evnVarName];
-//     if (!val) {
-//       throw new Error(`Environment variable "${evnVarName}" not found`);
-//     }
-//     mergedConfig.agent = val;
-//   }
-
-//   return mergedConfig;
-// }
 
 function getCompleteConfig(
   config: FileServiceConfig,
@@ -395,50 +395,6 @@ function getCompleteConfig(
   return mergedConfig;
 }
 
-
-// function mergeProfile(
-//   target: FileServiceConfig,
-//   source: FileServiceConfig
-// ): FileServiceConfig {
-//   // const res = Object.assign({}, target);
-//   // delete res.profiles;
-
-//   // Create a shallow copy of the target object and exclude 'profiles' from the copy.
-//   const res: FileServiceConfig = { ...target };
-//   delete res.profiles;
-
-//   logger.info('Merging profiles...', { targetConfig: target, sourceConfig: source });
-
-//   // // Merge properties from the source into the result.
-//   // const keys = Object.keys(source);
-//   // for (const key of keys) {
-//   //   if (key === 'ignore') {
-//   //     res.ignore = res.ignore.concat(source.ignore);
-//   //   } else {
-//   //     res[key] = source[key];
-//   //   }
-//   // }
-
-//   // return res;
-
-//   // Merge properties from the source into the result.
-//   Object.keys(source).forEach(key => {
-//     if (key === 'ignore' && Array.isArray(res.ignore) && Array.isArray(source.ignore)) {
-//       // Concatenate ignore arrays if both are arrays.
-//       logger.debug(`Merging 'ignore' arrays:`, { targetIgnore: res.ignore, sourceIgnore: source.ignore });
-//       res.ignore = [...res.ignore, ...source.ignore];
-//     } else {
-//       // Directly assign other properties.
-//       logger.debug(`Merging property '${key}':`, { value: source[key] });
-//       res[key] = source[key];
-//     }
-//   });
-
-//   logger.info('Profiles merged successfully', { mergedConfig: res });
-
-//   return res;
-// }
-
 function mergeProfile(
   target: FileServiceConfig,
   source: FileServiceConfig
@@ -447,28 +403,36 @@ function mergeProfile(
   const res: FileServiceConfig = { ...target };
   delete res.profiles;
 
-  logger.info('Merging profiles...', { targetConfig: target, sourceConfig: source });
+  logger.info('Starting profile merge...', { targetConfig: target, sourceConfig: source });
 
   // Iterate over each property in the source configuration and merge it into the result
-  Object.keys(source).forEach(key => {
+  Object.keys(source).forEach((key) => {
     if (key === 'ignore') {
-      // If both target and source have 'ignore' arrays, merge them
+      // Special handling for 'ignore' property if both target and source have 'ignore' arrays
       if (Array.isArray(res.ignore) && Array.isArray(source.ignore)) {
-        logger.debug(`Merging 'ignore' arrays:`, { targetIgnore: res.ignore, sourceIgnore: source.ignore });
+        logger.debug(`Merging 'ignore' arrays...`, {
+          targetIgnore: res.ignore,
+          sourceIgnore: source.ignore,
+        });
+        // Combine arrays, preserving both
         res.ignore = [...res.ignore, ...source.ignore];
       } else {
-        // If one or both 'ignore' is not an array, just replace the target 'ignore' with the source
-        logger.warn(`Invalid 'ignore' property format in either target or source. Replacing 'ignore' with source.`);
+        // Handle cases where 'ignore' is not a valid array
+        logger.warn(
+          `Invalid 'ignore' property format in either target or source. Replacing 'ignore' with source.`,
+          { targetIgnore: res.ignore, sourceIgnore: source.ignore }
+        );
+        // Replace with the source's 'ignore' if it's a valid array, otherwise default to an empty array
         res.ignore = Array.isArray(source.ignore) ? source.ignore : [];
       }
     } else {
-      // Directly assign properties that are not 'ignore'
-      logger.debug(`Merging property '${key}':`, { value: source[key] });
+      // Handle merging of all other properties
+      logger.debug(`Merging property '${key}'...`, { value: source[key] });
       res[key] = source[key];
     }
   });
 
-  logger.info('Profiles merged successfully', { mergedConfig: res });
+  logger.info('Profiles merged successfully.', { mergedConfig: res });
 
   return res;
 }
@@ -480,344 +444,6 @@ enum Event {
 }
 
 let id = 0;
-
-// export default class FileService {
-//   private _eventEmitter: EventEmitter = new EventEmitter();
-//   private _name: string;
-//   private _watcherConfig: WatcherConfig;
-//   private _profiles: string[];
-//   private _pendingTransferTasks: Set<TransferTask> = new Set();
-//   private _transferSchedulers: TransferScheduler[] = [];
-//   private _config: FileServiceConfig;
-//   private _configValidator: ConfigValidator;
-//   private _watcherService: WatcherService = {
-//     create() {
-//       /* do nothing  */
-//     },
-//     dispose() {
-//       /* do nothing  */
-//     },
-//   };
-//   id: number;
-//   baseDir: string;
-//   workspace: string;
-
-//   constructor(baseDir: string, workspace: string, config: FileServiceConfig) {
-//     this.id = ++id;
-//     this.workspace = workspace;
-//     this.baseDir = baseDir;
-//     this._watcherConfig = config.watcher;
-//     this._config = config;
-//     if (config.profiles) {
-//       this._profiles = Object.keys(config.profiles);
-//     }
-//   }
-
-//   get name(): string {
-//     return this._name ? this._name : '';
-//   }
-
-//   set name(name: string) {
-//     this._name = name;
-//   }
-
-//   setConfigValidator(configValidator: ConfigValidator) {
-//     this._configValidator = configValidator;
-//   }
-
-//   setWatcherService(watcherService: WatcherService) {
-//     if (this._watcherService) {
-//       this._disposeWatcher();
-//     }
-
-//     this._watcherService = watcherService;
-//     this._createWatcher();
-//   }
-
-//   getAvailableProfiles(): string[] {
-//     return this._profiles || [];
-//   }
-
-//   getPendingTransferTasks(): TransferTask[] {
-//     return Array.from(this._pendingTransferTasks);
-//   }
-
-//   isTransferring() {
-//     return this._transferSchedulers.length > 0;
-//   }
-
-//   cancelTransferTasks() {
-//     // keep the order
-//     // 1, remove tasks not start
-//     this._transferSchedulers.forEach(transfer => transfer.stop());
-//     this._transferSchedulers.length = 0;
-
-//     // 2. cancel running task
-//     this._pendingTransferTasks.forEach(t => t.cancel());
-//     this._pendingTransferTasks.clear();
-//   }
-
-//   beforeTransfer(listener: (task: TransferTask) => void) {
-//     this._eventEmitter.on(Event.BEFORE_TRANSFER, listener);
-//   }
-
-//   afterTransfer(listener: (err: Error | null, task: TransferTask) => void) {
-//     this._eventEmitter.on(Event.AFTER_TRANSFER, listener);
-//   }
-
-//   createTransferScheduler(concurrency): TransferScheduler {
-//     const fileService = this;
-//     const scheduler = new Scheduler({
-//       autoStart: false,
-//       concurrency,
-//     });
-//     scheduler.onTaskStart(task => {
-//       this._pendingTransferTasks.add(task as TransferTask);
-//       this._eventEmitter.emit(Event.BEFORE_TRANSFER, task);
-//     });
-//     scheduler.onTaskDone((err, task) => {
-//       this._pendingTransferTasks.delete(task as TransferTask);
-//       this._eventEmitter.emit(Event.AFTER_TRANSFER, err, task);
-//     });
-
-//     let runningPromise: Promise<void> | null = null;
-//     let isStopped: boolean = false;
-//     const transferScheduler: TransferScheduler = {
-//       get size() {
-//         return scheduler.size;
-//       },
-//       stop() {
-//         isStopped = true;
-//         scheduler.empty();
-//       },
-//       add(task: TransferTask) {
-//         if (isStopped) {
-//           return;
-//         }
-
-//         scheduler.add(task);
-//       },
-//       run() {
-//         if (isStopped) {
-//           return Promise.resolve();
-//         }
-
-//         if (scheduler.size <= 0) {
-//           fileService._removeScheduler(transferScheduler);
-//           return Promise.resolve();
-//         }
-
-//         if (!runningPromise) {
-//           runningPromise = new Promise(resolve => {
-//             scheduler.onIdle(() => {
-//               runningPromise = null;
-//               fileService._removeScheduler(transferScheduler);
-//               resolve();
-//             });
-//             scheduler.start();
-//           });
-//         }
-//         return runningPromise;
-//       },
-//     };
-//     fileService._storeScheduler(transferScheduler);
-
-//     return transferScheduler;
-//   }
-
-//   getLocalFileSystem(): FileSystem {
-//     return localFs;
-//   }
-
-//   getRemoteFileSystem(config: ServiceConfig): Promise<FileSystem> {
-//     return createRemoteIfNoneExist(getHostInfo(config));
-//   }
-
-//   // getConfig(useProfile = app.state.profile): ServiceConfig {
-//   //   let config = this._config;
-//   //   const hasProfile =
-//   //     config.profiles && Object.keys(config.profiles).length > 0;
-//   //   if (hasProfile && useProfile) {
-//   //     logger.info(`Using profile: ${useProfile}`);
-//   //     const profile = config.profiles![useProfile];
-//   //     if (!profile) {
-//   //       throw new Error(
-//   //         `Unkown Profile "${useProfile}".` +
-//   //           ' Please check your profile setting.' +
-//   //           ' You can set a profile by running command `SFTP: Set Profile`.'
-//   //       );
-//   //     }
-//   //     config = mergeProfile(config, profile);
-//   //   }
-
-//   //   const completeConfig = getCompleteConfig(config, this.workspace);
-//   //   const error =
-//   //     this._configValidator && this._configValidator(completeConfig);
-//   //   if (error) {
-//   //     let errorMsg = `Config validation fail: ${error.message}.`;
-//   //     // tslint:disable-next-line triple-equals
-//   //     if (hasProfile && app.state.profile == null) {
-//   //       errorMsg += ' You might want to set a profile first.';
-//   //     }
-//   //     throw new Error(errorMsg);
-//   //   }
-
-//   //   return this._resolveServiceConfig(completeConfig);
-//   // }
-
-//   getConfig(useProfile = app.state.profile): ServiceConfig {
-//     logger.info(`function getConfig in fileService.ts`)
-//     try {
-//       let config = this._config;
-  
-//       // Log the config object
-//       logger.debug(`config: ${JSON.stringify(config)}`);
-
-//       // Check for profiles
-//       const hasProfiles =
-//         config.profiles && Object.keys(config.profiles || {}).length > 0;
-//       logger.debug(`hasProfiles: ${hasProfiles}`)
-
-//       // Handle profile selection
-//       if (hasProfiles && useProfile) {
-//         logger.debug(`Using profile: ${useProfile}`);
-        
-//         // Validate the profile
-//         // const profile = config.profiles![useProfile];
-//         const profile = config.profiles ? config.profiles[useProfile] : undefined;
-//         if (!profile) {
-//           const errorMsg = `Unknown Profile "${useProfile}". Please check your profile setting. You can set a profile by running the command \`SFTP: Set Profile\`.`;
-//           logger.error(errorMsg);
-//           throw new Error(errorMsg);
-//         }
-
-//         // if (!profile) {
-//         //   const errorMsg = `Unknown Profile "${useProfile}".` +
-//         //     ' Please check your profile setting.' +
-//         //     ' You can set a profile by running the command `SFTP: Set Profile`.';
-//         //   logger.error(errorMsg);
-//         //   throw new Error(errorMsg);
-//         // }
-  
-//         // Merge profile into config
-//         config = mergeProfile(config, profile);
-//       } else if (hasProfiles) {
-//         logger.warn('No profile specified. Default configuration will be used.');
-//       }
-  
-//       // Complete the configuration
-//       const completeConfig = getCompleteConfig(config, this.workspace);
-  
-//       // Validate configuration
-//       if (this._configValidator) {
-//         const error = this._configValidator(completeConfig);
-//         if (error) {
-//           // let errorMsg = `Config validation failed: ${error.message}.`;
-//           const errorMsg = `Config validation failed: ${error.message}.` +
-//             (hasProfiles && !useProfile ? ' You might want to set a profile first.' : '');
-//           logger.error(errorMsg, { completeConfig });
-//           throw new Error(errorMsg);
-
-//           // // Add suggestion if no profile is set
-//           // if (hasProfiles && app.state.profile == null) {
-//           //   errorMsg += ' You might want to set a profile first.';
-//           // }
-  
-//           // logger.error(errorMsg, { completeConfig });
-//           // throw new Error(errorMsg);
-//         }
-//       }
-  
-//       logger.info('Configuration validation passed successfully.', { completeConfig });
-      
-//       // Resolve service configuration
-//       return this._resolveServiceConfig(completeConfig);
-  
-//     } catch (err) {
-//       logger.critical('Error in getConfig:', err);
-//       throw err; // Rethrow error after logging
-//     }
-//   }
-
-//   getAllConfig(): Array<ServiceConfig> {
-//     const profiles = this._config.profiles;
-//     return profiles ? Object.keys(profiles).map(p => this.getConfig(p)) : [];
-//   }
-
-//   dispose() {
-//     this._disposeWatcher();
-//     this._disposeFileSystem();
-//   }
-
-//   private _resolveServiceConfig(
-//     fileServiceConfig: FileServiceConfig
-//   ): ServiceConfig {
-//     const serviceConfig: ServiceConfig = fileServiceConfig as any;
-
-//     if (serviceConfig.port === undefined) {
-//       serviceConfig.port = chooseDefaultPort(serviceConfig.protocol);
-//     }
-//     if (serviceConfig.protocol === 'ftp') {
-//       serviceConfig.concurrency = 1;
-//     }
-//     serviceConfig.ignore = this._createIgnoreFn(fileServiceConfig);
-
-//     return serviceConfig;
-//   }
-
-//   private _storeScheduler(scheduler: TransferScheduler) {
-//     this._transferSchedulers.push(scheduler);
-//   }
-
-//   private _removeScheduler(scheduler: TransferScheduler) {
-//     const index = this._transferSchedulers.findIndex(s => s === scheduler);
-//     if (index !== -1) {
-//       this._transferSchedulers.splice(index, 1);
-//     }
-//   }
-
-//   private _createIgnoreFn(config: FileServiceConfig): ServiceConfig['ignore'] {
-//     const localContext = this.baseDir;
-//     const remoteContext = config.remotePath;
-
-//     const ignoreConfig = filesIgnoredFromConfig(config);
-//     if (ignoreConfig.length <= 0) {
-//       return null;
-//     }
-
-//     const ignore = Ignore.from(ignoreConfig);
-//     const ignoreFunc = fsPath => {
-//       // vscode will always return path with / as separator
-//       const normalizedPath = path.normalize(fsPath);
-//       let relativePath;
-//       if (normalizedPath.indexOf(localContext) === 0) {
-//         // local path
-//         relativePath = path.relative(localContext, fsPath);
-//       } else {
-//         // remote path
-//         relativePath = upath.relative(remoteContext, fsPath);
-//       }
-
-//       // skip root
-//       return relativePath !== '' && ignore.ignores(relativePath);
-//     };
-
-//     return ignoreFunc;
-//   }
-
-//   private _createWatcher() {
-//     this._watcherService.create(this.baseDir, this._watcherConfig);
-//   }
-
-//   private _disposeWatcher() {
-//     this._watcherService.dispose(this.baseDir);
-//   }
-
-//   // fixme: remote all profiles
-//   private _disposeFileSystem() {
-//     return removeRemoteFs(getHostInfo(this.getConfig()));
-//   }
-// }
 
 export default class FileService {
   private _eventEmitter: EventEmitter = new EventEmitter();

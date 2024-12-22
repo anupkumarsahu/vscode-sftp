@@ -93,7 +93,7 @@ export function createFileService(config: any, workspace: string) {
   const normalizedBasePath = getBasePath(config.context, workspace);
   const service = new FileService(normalizedBasePath, workspace, config);
 
-  logger.info(`config at ${normalizedBasePath}`, maskConfig(config));
+  logger.debug(`config at ${normalizedBasePath}`, maskConfig(config));
 
   serviceManager.add(normalizedBasePath, service);
   service.name = config.name;
